@@ -1,0 +1,51 @@
+# Sample configuration file for URL Matcher
+# Copy this to config.yaml and set your actual API keys
+
+ai:
+  # Provider: openai, azure, anthropic, openai_compatible, or liara
+  provider: openai_compatible
+
+  # Model name (depends on your provider)
+  # For OpenAI: gpt-4o-mini, gpt-4, gpt-3.5-turbo
+  # For Anthropic: claude-3-5-sonnet-20241022, claude-3-opus-20240229
+  # For Liara/compatible: openai/gpt-4o-mini or your provider's model ID
+  model: openai/gpt-4o-mini
+
+  # Temperature (0.0 = deterministic, 1.0 = creative)
+  temperature: 0.0
+
+  # Request JSON response format (true recommended)
+  response_json: true
+
+  # Timeout for API requests (seconds)
+  timeout_seconds: 60
+
+  # Maximum retry attempts on failure
+  max_retries: 3
+
+  # Base delay for exponential backoff (seconds)
+  retry_base_delay: 1.5
+
+  # Queries per second (rate limiting)
+  qps: 1.0
+
+  # --- OpenAI settings ---
+  openai_api_key: "env:OPENAI_API_KEY"
+  openai_base_url: "https://api.openai.com/v1"
+
+  # --- Azure OpenAI settings ---
+  azure_endpoint: "https://YOUR-RESOURCE-NAME.openai.azure.com"
+  azure_api_key: "env:AZURE_OPENAI_API_KEY"
+  azure_api_version: "2024-02-15-preview"
+  azure_deployment: "your-deployment-name"
+
+  # --- Anthropic settings ---
+  anthropic_api_key: "env:ANTHROPIC_API_KEY"
+  anthropic_api_version: "2023-06-01"
+
+  # --- OpenAI-compatible / Liara / Local settings ---
+  # Example for Liara: "https://ai.liara.ir/api/YOUR_PROJECT_ID/v1"
+  # Example for local Ollama: "http://localhost:11434/v1"
+  compatible_base_url: "https://ai.liara.ir/api/YOUR_PROJECT_ID/v1"
+  compatible_api_key: "env:LIARA_API_KEY"
+
