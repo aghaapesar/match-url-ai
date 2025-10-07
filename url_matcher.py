@@ -165,6 +165,44 @@ def extract_slug(url: str) -> str:
     return parts[-1]
 
 
+def extract_segments(url: str) -> List[str]:
+    """Extract URL path segments (e.g., ['blog', 'post-title'] or ['shop', 'category', 'product'])"""
+    path = urlparse(url).path
+    if not path:
+        return []
+    parts = [p for p in path.split("/") if p]
+    return parts
+
+
+def get_primary_segment(url: str) -> str:
+    """Get the primary segment (e.g., 'blog', 'shop', 'product-category')"""
+    segments = extract_segments(url)
+    return segments[0] if segments else ""
+
+
+def is_category_or_brand_page(url: str) -> bool:
+    """Check if URL is likely a category or brand page (not individual product/post)"""
+    path = urlparse(url).path.lower()
+    segments = extract_segments(url)
+    
+    # Category/brand indicators
+    category_keywords = ["category", "categories", "brand", "brands", "collection", "collections", 
+                         "product-category", "product-brand", "دسته", "برند", "مجموعه"]
+    
+    # Check if any segment contains category keywords
+    for seg in segments:
+        for keyword in category_keywords:
+            if keyword in seg:
+                return True
+    
+    # Heuristic: shorter paths are often categories (e.g., /shop/electronics vs /shop/electronics/phone-123)
+    if len(segments) >= 2 and len(segments) <= 3:
+        # Could be category level
+        return True
+    
+    return False
+
+
 def tokenize_slug(slug: str) -> List[str]:
     clean = slug.replace("-", " ").replace("_", " ")
     tokens = [t for t in clean.split() if t]
@@ -183,31 +221,91 @@ def heuristic_score(old_slug: str, new_slug: str) -> float:
     return 0.7 * jaccard + 0.3 * prefix
 
 
-def top_k_candidates(old_url: str, new_urls: List[str], k: int = 15) -> List[str]:
+def segment_aware_score(old_url: str, new_url: str, slug_score: float) -> float:
+    """Enhanced scoring that considers URL segments and prioritizes categories"""
+    old_primary = get_primary_segment(old_url)
+    new_primary = get_primary_segment(new_url)
+    old_segments = extract_segments(old_url)
+    new_segments = extract_segments(new_url)
+    
+    base_score = slug_score
+    
+    # Boost: Same primary segment (blog->blog, shop->shop)
+    if old_primary and new_primary and old_primary == new_primary:
+        base_score += 0.3
+    
+    # Boost: Category/brand pages get higher priority
+    if is_category_or_brand_page(new_url):
+        base_score += 0.25
+    
+    # Boost: More segment overlap
+    common_segments = len(set(old_segments) & set(new_segments))
+    if common_segments > 1:
+        base_score += 0.1 * common_segments
+    
+    return min(base_score, 1.0)
+
+
+def top_k_candidates(old_url: str, new_urls: List[str], k: int = 20) -> List[str]:
+    """Select top candidates with segment-aware scoring and fallback hierarchy"""
     old_slug = extract_slug(old_url)
+    old_primary = get_primary_segment(old_url)
+    
     scored: List[Tuple[float, str]] = []
     for u in new_urls:
-        s = heuristic_score(old_slug, extract_slug(u))
-        scored.append((s, u))
+        slug_score = heuristic_score(old_slug, extract_slug(u))
+        final_score = segment_aware_score(old_url, u, slug_score)
+        scored.append((final_score, u))
+    
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [u for _, u in scored[:k]]
+    
+    # Ensure we have fallback URLs: same segment root, categories, and main segment
+    candidates = [u for _, u in scored[:k]]
+    
+    # Add fallback: main segment URL (e.g., /blog, /shop) if not already included
+    if old_primary:
+        fallback_urls = [u for u in new_urls if get_primary_segment(u) == old_primary and len(extract_segments(u)) == 1]
+        for fallback in fallback_urls[:2]:
+            if fallback not in candidates:
+                candidates.append(fallback)
+    
+    return candidates[:k]
 
 
 def build_prompt(old_url: str, candidates: List[str]) -> Tuple[str, str]:
+    old_segments = extract_segments(old_url)
+    old_primary = get_primary_segment(old_url)
+    
     system_prompt = (
-        "You are a URL migration assistant. Match legacy URLs to their best new URL based on topic/meaning. "
-        "Slugs may be in Persian. Prefer exact topical continuity over string similarity. Return strict JSON."
+        "You are a URL migration assistant for SEO redirects. Match legacy URLs to their best new URL "
+        "based on topic/meaning and URL structure. Slugs may be in Persian. "
+        "Always respond in JSON format with the required keys."
     )
+    
+    # Identify category/brand pages in candidates
+    category_urls = [c for c in candidates if is_category_or_brand_page(c)]
+    
     user_prompt = (
-        "Old URL:\n"
-        f"{old_url}\n\n"
-        "Candidate new URLs (ordered by heuristic):\n"
+        f"Old URL: {old_url}\n"
+        f"Primary segment: {old_primary or 'none'}\n"
+        f"Path depth: {len(old_segments)}\n\n"
+        "Candidate new URLs (pre-scored by segment similarity):\n"
         + "\n".join(f"- {c}" for c in candidates)
         + "\n\n"
-        "Rules:\n"
-        "- Consider semantics, synonyms, and language nuances (including Persian).\n"
-        "- If none match topically, still pick the closest and lower confidence.\n"
-        "Output JSON with keys: best_new_url, confidence (0..1), rationale."
+        "**Matching Priority Rules:**\n"
+        "1. **Exact Match**: Same topic/product/post in the same primary segment (e.g., blog→blog, shop→shop)\n"
+        "2. **Category/Brand Fallback**: If exact match not found, prefer category or brand pages in same segment\n"
+        "3. **Segment Root Fallback**: If no category found, use the main segment root (e.g., /shop, /blog)\n"
+        "4. **Cross-segment**: Only as last resort, use different segment\n\n"
+        "Additional considerations:\n"
+        "- **Prioritize category/brand pages** over individual products/posts when uncertain\n"
+        "- Consider semantic similarity (Persian-aware)\n"
+        "- Match URL depth when possible (product→product, not product→category unless no alternative)\n\n"
+        f"Category/brand URLs in candidates: {len(category_urls)}\n\n"
+        "Return your response as a JSON object with exactly these keys:\n"
+        "- best_new_url: (string) the selected URL from candidates\n"
+        "- confidence: (number) 0 to 1\n"
+        "- rationale: (string) explain which matching level was used and why"
     )
     return system_prompt, user_prompt
 
@@ -227,18 +325,27 @@ def ai_match(client: AIClient, old_url: str, candidates: List[str]) -> Dict[str,
 
 
 def run_matching(old_urls: List[str], new_urls: List[str], client: AIClient, mode: str, min_confidence: float) -> pd.DataFrame:
-    rows = old_urls[:50] if mode == "test" else old_urls
+    rows = old_urls[:20] if mode == "test" else old_urls
     records: List[Dict[str, str]] = []
     for old_url in tqdm(rows, desc="Matching"):
-        candidates = top_k_candidates(old_url, new_urls, k=15)
+        candidates = top_k_candidates(old_url, new_urls, k=20)
         match = ai_match(client, old_url, candidates)
         low_conf = match["confidence"] < float(min_confidence)
         rationale = match["rationale"]
         if low_conf:
             rationale = (rationale + f" | below_min_confidence<{min_confidence}>").strip()
+        
+        # Add segment info for debugging
+        old_primary = get_primary_segment(old_url)
+        new_primary = get_primary_segment(match["best_new_url"])
+        is_category = is_category_or_brand_page(match["best_new_url"])
+        
         records.append({
             "old_url": old_url,
+            "old_segment": old_primary,
             "best_new_url": match["best_new_url"],
+            "new_segment": new_primary,
+            "is_category_page": is_category,
             "confidence": match["confidence"],
             "low_confidence": low_conf,
             "rationale": rationale,
@@ -305,11 +412,41 @@ def save_excel_with_styles(df: pd.DataFrame, out_path: Path) -> None:
     wb.save(out_path)
 
 
+def get_existing_sitemaps(sitemaps_dir: Path) -> List[Path]:
+    """Find all XML files in sitemaps directory"""
+    if not sitemaps_dir.exists():
+        return []
+    xml_files = list(sitemaps_dir.glob("*.xml"))
+    return xml_files
+
+
+def display_sitemap_stats(sitemap_paths: List[Path]) -> None:
+    """Display statistics for each sitemap file"""
+    print("\n" + "="*60)
+    print(f"Found {len(sitemap_paths)} sitemap file(s) in directory:")
+    print("="*60)
+    
+    total_urls = 0
+    for idx, path in enumerate(sitemap_paths, start=1):
+        try:
+            urls = parse_sitemap_urls(path)
+            count = len(urls)
+            total_urls += count
+            print(f"{idx}. {path.name}: {count} URLs")
+        except Exception as e:
+            print(f"{idx}. {path.name}: Error reading ({e})")
+    
+    print("="*60)
+    print(f"Total unique URLs across all sitemaps will be calculated...")
+    print("="*60 + "\n")
+
+
 def interactive_flow(config: Dict, sitemaps_dir: Path, min_confidence: float, mode: str, out_path: Path, verbose: bool) -> None:
     print("Starting interactive URL matching wizard…")
     print("1) You'll be asked for the Excel file containing old URLs.")
     print("2) Then enter sitemap URLs one by one; type 'finishsitemaps' to start matching.")
-    print("3) We will download each sitemap (up to 10 tries, with optional extra tries).\n")
+    print("3) If you type 'finishsitemaps' immediately, we'll check the sitemaps folder for existing files.")
+    print("4) We will download each sitemap (up to 10 tries, with optional extra tries).\n")
 
     # Excel path
     excel_path: Optional[Path] = None
@@ -328,8 +465,10 @@ def interactive_flow(config: Dict, sitemaps_dir: Path, min_confidence: float, mo
             print("File not found, try again.")
 
     # Collect sitemap URLs and download per URL immediately
-    print("Enter sitemap URLs now. Type 'finishsitemaps' to proceed.")
+    print("\nEnter sitemap URLs now. Type 'finishsitemaps' to proceed (or check existing sitemaps folder).")
     sitemap_paths: List[Path] = []
+    first_input = True
+    
     while True:
         try:
             line = input("Sitemap URL (or 'finishsitemaps'): ").strip()
@@ -338,7 +477,31 @@ def interactive_flow(config: Dict, sitemaps_dir: Path, min_confidence: float, mo
         if not line:
             continue
         if line.lower() == "finishsitemaps":
+            # Check if this is the first input and no sitemaps downloaded yet
+            if first_input and not sitemap_paths:
+                print("\nChecking sitemaps folder for existing files...")
+                existing_sitemaps = get_existing_sitemaps(sitemaps_dir)
+                if existing_sitemaps:
+                    display_sitemap_stats(existing_sitemaps)
+                    try:
+                        use_existing = input("Use these existing sitemaps? (Y/n): ").strip().lower()
+                    except EOFError:
+                        use_existing = "y"
+                    if use_existing in ("", "y", "yes"):
+                        sitemap_paths.extend(existing_sitemaps)
+                        break
+                    else:
+                        print("Please enter sitemap URLs manually:")
+                        first_input = False
+                        continue
+                else:
+                    print(f"No sitemaps found in '{sitemaps_dir}' folder.")
+                    print("Please enter sitemap URLs:")
+                    first_input = False
+                    continue
             break
+        
+        first_input = False
         path = fetch_single_sitemap(line, sitemaps_dir, allow_prompt=True)
         if path is not None:
             sitemap_paths.append(path)
@@ -356,17 +519,50 @@ def interactive_flow(config: Dict, sitemaps_dir: Path, min_confidence: float, mo
         return
 
     # Proceed with matching
-    client = AIClient(config.get("ai", {}))
+    print("\n" + "="*60)
+    print("Initializing AI client...")
+    print("="*60)
+    
+    ai_config = config.get("ai", {})
+    print(f"Provider: {ai_config.get('provider')}")
+    print(f"Model: {ai_config.get('model')}")
+    
+    if ai_config.get('provider') == 'openai_compatible':
+        base_url = ai_config.get('compatible_base_url', '')
+        api_key = ai_config.get('compatible_api_key', '')
+        print(f"Base URL: {base_url}")
+        print(f"API Key: {'*' * (len(api_key) - 10) + api_key[-10:] if api_key else 'NOT SET'}")
+    
+    client = AIClient(ai_config)
+    
+    print("\nTesting connection...")
+    if not client.test_connection():
+        print("\n❌ Connection test failed! Please check your config.yaml settings.")
+        print("   - Verify provider is set correctly")
+        print("   - Verify API key is correct")
+        print("   - Verify base URL is correct\n")
+        try:
+            cont = input("Continue anyway? (y/N): ").strip().lower()
+        except EOFError:
+            cont = "n"
+        if cont not in ("y", "yes"):
+            print("Exiting.")
+            return
+    else:
+        print("✅ Connection test successful!\n")
+    
     if verbose:
         logging.info("Reading old URLs…")
     old_urls = read_old_urls(excel_path)
-    print(f"Read {len(old_urls)} old URLs. Parsing {len(sitemap_paths)} sitemap file(s)…")
+    print(f"Read {len(old_urls)} old URLs from Excel.")
+    print(f"Parsing {len(sitemap_paths)} sitemap file(s)…")
     new_urls = parse_multiple_sitemaps(sitemap_paths)
-    print(f"Collected {len(new_urls)} unique new URLs. Starting matching in {mode} mode…")
+    print(f"Collected {len(new_urls)} unique new URLs.")
+    print(f"Starting matching in {mode} mode…\n")
 
     df = run_matching(old_urls, new_urls, client, mode, min_confidence)
     save_excel_with_styles(df, out_path)
-    print(f"Done. Results saved to: {out_path}")
+    print(f"\n✅ Done! Results saved to: {out_path}")
 
 
 def main():
@@ -401,7 +597,17 @@ def main():
 
     excel_path = Path(args.excel)
 
-    client = AIClient(config.get("ai", {}))
+    logging.info("Initializing AI client…")
+    ai_config = config.get("ai", {})
+    logging.info("Provider: %s, Model: %s", ai_config.get("provider"), ai_config.get("model"))
+    
+    client = AIClient(ai_config)
+    
+    logging.info("Testing connection…")
+    if not client.test_connection():
+        logging.error("❌ Connection test failed! Check your config.yaml")
+        sys.exit(3)
+    logging.info("✅ Connection test successful")
 
     logging.info("Reading old URLs…")
     old_urls = read_old_urls(excel_path)

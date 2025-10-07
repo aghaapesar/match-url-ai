@@ -74,6 +74,19 @@ class AIClient:
                 time.sleep(backoff)
         raise AIClientError(f"AI request failed after {self.max_retries} retries: {last_exc}")
 
+    def test_connection(self) -> bool:
+        """Test API connection with a simple request"""
+        try:
+            result = self.chat_json(
+                "You are a test assistant. Always respond in JSON format.",
+                "Reply with this JSON: {\"status\": \"connected\", \"test\": \"success\"}",
+                max_output_tokens=50
+            )
+            return True
+        except Exception as e:
+            print(f"Connection test failed: {e}")
+            return False
+
     def chat_json(self, system_prompt: str, user_prompt: str, max_output_tokens: int = 512) -> Dict[str, Any]:
         if self.provider == "openai":
             return self._chat_openai(system_prompt, user_prompt, max_output_tokens)

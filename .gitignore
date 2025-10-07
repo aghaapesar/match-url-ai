@@ -3,6 +3,7 @@ config.yaml
 
 # Personal documentation (not for public repo)
 GITHUB_SETUP.md
+GITHUB_PUSH_GUIDE.md
 
 # Python virtual environments
 .venv/
